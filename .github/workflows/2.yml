@@ -1,0 +1,184 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Test on macOS for development validation
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Install dependencies (macOS)
+        run: |
+          brew install cmake pkg-config openssl librdkafka
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          
+      - name: Run tests
+        run: cargo test --features "ssl"
+
+  # Build matrix for multiple platforms
+  build:
+    needs: test-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds with full features
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-20.04
+            features: "ssl-vendored,sasl,gssapi-vendored,cmake-build"
+            
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-20.04
+            features: "ssl-vendored,cmake-build"
+            use-cross: true
+            
+          # Windows builds - the main focus
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            features: "ssl-vendored,cmake-build"
+            
+          # macOS builds
+          - target: x86_64-apple-darwin
+            os: macos-12
+            features: "ssl-vendored,sasl,cmake-build"
+            
+          - target: aarch64-apple-darwin
+            os: macos-12
+            features: "ssl-vendored,sasl,cmake-build"
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          
+      # Linux-specific setup
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            pkg-config \
+            libssl-dev \
+            libsasl2-dev \
+            libzstd-dev \
+            build-essential
+            
+      # macOS-specific setup  
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake pkg-config openssl librdkafka
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          
+      # Windows-specific setup - this is the critical part
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # Install CMake (usually pre-installed on GitHub runners)
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          
+          # Ensure Visual Studio Build Tools are available
+          $vsPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+          if (-not (Test-Path $vsPath)) {
+            $vsPath = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC"
+          }
+          Write-Output "Visual Studio path: $vsPath"
+          
+          # Set environment variables for Windows builds
+          echo "OPENSSL_NO_VENDOR=0" >> $env:GITHUB_ENV
+          echo "RUSTFLAGS=-Ctarget-feature=+crt-static" >> $env:GITHUB_ENV
+
+      # Install cross for musl builds
+      - name: Install cross
+        if: matrix.use-cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+        
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          
+      # Build step with proper feature flags
+      - name: Build with cross
+        if: matrix.use-cross
+        run: |
+          cross build --release --target ${{ matrix.target }} --features "${{ matrix.features }}"
+          
+      - name: Build native
+        if: '!matrix.use-cross'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features "${{ matrix.features }}"
+          
+      # Package binaries
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/your-app-name artifacts/your-app-name-${{ matrix.target }}
+          
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          Copy-Item target\${{ matrix.target }}\release\your-app-name.exe artifacts\your-app-name-${{ matrix.target }}.exe
+          
+      # Upload artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: your-app-name-${{ matrix.target }}
+          path: artifacts/*
+          
+  # Create release if building from a tag
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            */your-app-name-*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
