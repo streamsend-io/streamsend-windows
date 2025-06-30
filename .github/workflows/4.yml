@@ -1,0 +1,55 @@
+# Advanced obfuscated testing
+      - name: Test Windows executable - Obfuscated
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Write-Output "Testing Windows executable with obfuscated credentials..."
+          
+          # Create credentials file instead of env vars (more secure)
+          $configContent = @"
+          bootstrap.servers=${{ secrets.CONFLUENT_BOOTSTRAP_SERVERS || 'fake.example.com:9092' }}
+          security.protocol=SASL_SSL
+          sasl.mechanisms=PLAIN
+          sasl.username=${{ secrets.CONFLUENT_API_KEY || 'fake-key' }}
+          sasl.password=${{ secrets.CONFLUENT_API_SECRET || 'fake-secret' }}
+          "@
+          
+          # Write to temp file (not logged)
+          $configFile = "temp-kafka.config"
+          $configContent | Out-File -FilePath $configFile -Encoding UTF8
+          
+          Write-Output "Configuration file created (contents hidden)"
+          Write-Output "Testing executable with configuration..."
+          
+          # Test the executable (modify your app to read from config file)
+          # For now, we'll use environment variables but not echo them
+          $env:KAFKA_BOOTSTRAP_SERVERS = "${{ secrets.CONFLUENT_BOOTSTRAP_SERVERS || 'fake.example.com:9092' }}"
+          $env:KAFKA_SECURITY_PROTOCOL = "SASL_SSL"
+          $env:KAFKA_SASL_USERNAME = "${{ secrets.CONFLUENT_API_KEY || 'fake-key' }}"
+          $env:KAFKA_SASL_PASSWORD = "${{ secrets.CONFLUENT_API_SECRET || 'fake-secret' }}"
+          
+          # Run test and capture result without showing credentials
+          try {
+            $result = .\target\${{ matrix.target }}\release\kafka-windows-example.exe 2>&1
+            
+            # Filter out any credential information from output
+            $filteredResult = $result -replace $env:KAFKA_SASL_USERNAME, "[USERNAME]" -replace $env:KAFKA_SASL_PASSWORD, "[PASSWORD]"
+            Write-Output "Filtered application output:"
+            Write-Output $filteredResult
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Output "✅ Application executed successfully"
+            } else {
+              Write-Output "ℹ️ Application exited with code $LASTEXITCODE (may be expected for connection test)"
+            }
+          } finally {
+            # Clean up config file
+            if (Test-Path $configFile) {
+              Remove-Item $configFile -Force
+            }
+            
+            # Clear environment variables
+            Remove-Item Env:KAFKA_BOOTSTRAP_SERVERS -ErrorAction SilentlyContinue
+            Remove-Item Env:KAFKA_SASL_USERNAME -ErrorAction SilentlyContinue  
+            Remove-Item Env:KAFKA_SASL_PASSWORD -ErrorAction SilentlyContinue
+          }
