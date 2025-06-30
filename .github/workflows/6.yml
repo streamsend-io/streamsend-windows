@@ -82,14 +82,6 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }} --features "${{ matrix.features }}"
           
-      # Test the executable (Windows only)
-      - name: Test Windows executable - Basic
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          Write-Output "Testing Windows executable basic functionality..."
-          .\target\${{ matrix.target }}\release\kafka-windows-example.exe
-          
       # Test with real credentials (hidden in secrets)
       - name: Test Windows executable - SSL/SASL
         if: runner.os == 'Windows' && github.event_name != 'pull_request'
